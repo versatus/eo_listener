@@ -1,5 +1,5 @@
 use tokio::sync::oneshot::Receiver;
-use web3::{Web3, transports::Http, types::{FilterBuilder, H160, H256, Log}};
+use web3::{Web3, transports::Http, types::{FilterBuilder, H160, H256, Log, BlockNumber, Address, BlockId}, contract::{Contract, tokens::{Detokenize, Tokenize}, Options}, Transport};
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct StopToken;
@@ -123,16 +123,80 @@ impl EoServer {
                         Err(_) => {}
                     }
                 }
+                //TODO(asmith): add ability to request balances and contract data
+                //when transactions enter the network
             }
-        }
-        
+        }        
         Ok(())
-
     }
 
     // TODO(asmith): Handle actual events
     async fn handle_event(&mut self, log: Log) {
         println!("Received log: {:?}", log);
+    }
+
+    async fn get_account_balance_eth(
+        &mut self,
+        address: H160,
+        block: Option<BlockNumber>
+    ) -> Result<web3::types::U256, web3::Error> {
+        self.web3.eth().balance(address, block).await
+    }
+
+    async fn get_batch_account_balance_eth(
+        &mut self,
+        addresses: impl IntoIterator<Item = H160>,
+        block: Option<BlockNumber>
+    ) -> Result<Vec<(H160, web3::types::U256)>, web3::Error> {
+        let mut balances = Vec::new();
+        for address in addresses {
+            let balance = self.get_account_balance_eth(address, block).await?;
+            balances.push((address, balance));
+        }
+
+        Ok(balances)
+    }
+
+    async fn get_account_contract_data<T, R, A, B, P>(
+        &mut self,
+        address: A,
+        contract: Contract<T>,
+        block: B,
+        function: &str,
+        params: P,
+        options: Options
+    ) -> Result<R, web3::contract::Error> 
+    where
+        T: Transport,
+        R: Detokenize,
+        A: Into<Option<Address>>,
+        B: Into<Option<BlockId>>,
+        P: Tokenize
+    {
+        contract.query::<R, A, B, P>(function, params, address, options, block).await
+    }
+
+    async fn get_batch_account_contract_data<T, R, A, B, P>(
+        &mut self,
+        account_contract_data: impl IntoIterator<Item = (A, Contract<T>, &str, P, Options)>,
+        block: B
+    ) -> Result<Vec<(A, R)>, web3::contract::Error> 
+    where
+        T: Transport,
+        R: Detokenize,
+        A: Into<Option<Address>> + Clone,
+        B: Into<Option<BlockId>> + Clone,
+        P: Tokenize
+    {
+        let mut results = Vec::new();
+        for p in account_contract_data {
+            let res = self.get_account_contract_data(
+                p.0.clone(), p.1, block.clone(), p.2, p.3, p.4
+            ).await?;
+            results.push((p.0, res));
+        }
+
+        Ok(results)
     }
 }
 
