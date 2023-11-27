@@ -1,6 +1,14 @@
 use tokio::sync::oneshot::Receiver;
 use web3::{Web3, transports::Http, types::{FilterBuilder, H160, H256, Log, BlockNumber, Address, BlockId}, contract::{Contract, tokens::{Detokenize, Tokenize}, Options}, Transport};
 
+#[async_trait::async_trait]
+pub trait RpcServer: Clone {
+    type Item;
+
+    async fn pending(&mut self) -> Vec<Self::Item>;
+    async fn read(&mut self) -> Self::Item;
+}
+
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct StopToken;
 
@@ -11,14 +19,14 @@ pub enum EoServerError {
 }
 
 #[derive(Debug)]
-pub struct EoServerBuilder {
+pub struct EoServerBuilder<S: RpcServer> {
     web3: Option<Web3<Http>>,
     eo_address: Option<EoAddress>,
     event_signature_hash: Option<EventSignatureHash>,
-    rx: Option<Receiver<StopToken>>
+    rpc: Option<S>
 }
 
-impl EoServerBuilder {
+impl<S: RpcServer> EoServerBuilder<S> {
     pub fn new() -> Self {
         Default::default()
     }
@@ -37,13 +45,13 @@ impl EoServerBuilder {
         self.event_signature_hash = Some(event_signature_hash);
         self
     }
-
-    pub fn rx(mut self, rx: Receiver<StopToken>) -> Self {
-        self.rx = Some(rx);
+    
+    pub fn rpc(mut self, rpc: S) -> Self {
+        self.rpc = Some(rpc.clone());
         self
     }
 
-    pub fn build(&self) -> Result<EoServer, EoServerError> {
+    pub fn build(&self) -> Result<EoServer<S>, EoServerError> {
         let web3 = self.web3.clone()
             .ok_or(
                 EoServerError::MissingField(
@@ -61,21 +69,25 @@ impl EoServerBuilder {
         let event_signature_hash = self.event_signature_hash.clone()
             .ok_or(EoServerError::MissingField("event signature missing".to_string()))?;
 
+        let rpc = self.rpc.clone().ok_or(
+            EoServerError::MissingField("rpc server missed".to_string()))?;
+
         Ok(EoServer {
             web3,
             eo_address,
             event_signature_hash,
+            rpc
         })
     }
 }
 
-impl Default for EoServerBuilder {
+impl<S: RpcServer> Default for EoServerBuilder<S> {
     fn default() -> Self {
         Self {
             web3: None,
             eo_address: None,
             event_signature_hash: None,
-            rx: None
+            rpc: None
         }
     }
 }
@@ -83,13 +95,14 @@ impl Default for EoServerBuilder {
 /// An ExecutableOracle server that listens for events emitted from 
 /// an Ethereum Smart Contract
 #[derive(Debug)]
-pub struct EoServer {
+pub struct EoServer<S: RpcServer> {
     web3: Web3<Http>,
     eo_address: EoAddress,
     event_signature_hash: EventSignatureHash,
+    rpc:S 
 }
 
-impl EoServer {
+impl<S: RpcServer> EoServer<S> {
     /// The core method of this struct, opens up a listener 
     /// and listens for specific events from the Ethereum Executable 
     /// oracle contract, it then `handles` the events, which is to 
@@ -122,6 +135,8 @@ impl EoServer {
                         }
                         Err(_) => {}
                     }
+                },
+                transactions = self.pending() => {
                 }
                 //TODO(asmith): add ability to request balances and contract data
                 //when transactions enter the network
@@ -133,6 +148,14 @@ impl EoServer {
     // TODO(asmith): Handle actual events
     async fn handle_event(&mut self, log: Log) {
         println!("Received log: {:?}", log);
+    }
+
+    async fn rpc(&mut self) -> &mut S {
+        &mut self.rpc
+    }
+
+    async fn pending(&mut self) -> Vec<<S as RpcServer>::Item> { 
+        self.rpc.pending().await
     }
 
     async fn get_account_balance_eth(
