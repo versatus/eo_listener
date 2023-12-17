@@ -1,9 +1,12 @@
 #![allow(unused)]
 use derive_builder::Builder;
+use ractor::{ActorRef, Message};
+use ractor::concurrency::OneshotReceiver;
 use tokio::sync::{oneshot::Receiver, mpsc::UnboundedSender};
 use tokio::sync::mpsc::UnboundedReceiver;
 use serde::{Serialize, Deserialize};
-use web3::types::U64;
+use web3::ethabi::{RawLog, Log as ParsedLog};
+use web3::types::{U64, Filter};
 use web3::{
     Error as Web3Error,
     Web3, 
@@ -37,6 +40,26 @@ macro_rules! log_handler {
        }
     };
 }
+
+
+pub fn get_blob_index_settled_topic() -> Option<Vec<H256>> {
+    let mut hasher = Keccak256::new();
+    let blob_index_settled_sig = b"BlobIndexSettled(address,bytes32,string)";
+    hasher.update(blob_index_settled_sig);
+    let res: [u8; 32] = hasher.finalize().try_into().ok()?;
+    let blob_settled_topic = H256::from(res);
+    Some(vec![blob_settled_topic])
+}
+
+pub fn get_bridge_event_topic() -> Option<Vec<H256>> {
+    let mut hasher = Keccak256::new();
+    let bridge_sig = b"Bridge(address,address,uint256,uint256,string)";
+    hasher.update(bridge_sig);
+    let res: [u8; 32] = hasher.finalize().try_into().ok()?;
+    let bridge_topic = H256::from(res);
+    Some(vec![bridge_topic])
+}
+
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SettlementLayer {
@@ -102,14 +125,18 @@ impl From<String> for ContractAddress {
 /// An ExecutableOracle server that listens for events emitted from 
 /// Smart Contracts
 #[derive(Builder, Debug, Clone)]
-pub struct EoServer<M> {
+pub struct EoServer {
     web3: Web3<Http>,
     eo_address: EoAddress,
     last_processed_block: BlockNumber,
-    parent_actor: Option<ractor::ActorRef<M>>
+    contract: web3::contract::Contract<Http>,
+    blob_settled_filter: Filter,
+    bridge_filter: Filter,
+    blob_settled_event: web3::ethabi::Event,
+    bridge_event: web3::ethabi::Event
 }
 
-impl<M> EoServer<M> {
+impl EoServer {
     /// The core method of this struct, opens up a listener 
     /// and listens for specific events from the Ethereum Executable 
     /// oracle contract, it then `handles` the events, which is to 
@@ -117,46 +144,48 @@ impl<M> EoServer<M> {
     pub async fn run(
         &mut self,
     ) -> web3::Result<()> {
-        let contract_address = self.eo_address.parse().map_err(|err| {
-            web3::Error::Decoder(err.to_string())
-        })?;
-        let contract_abi = web3::ethabi::Contract::load(&include_bytes!("../eo_contract_abi.json")[..]).map_err(|e| {
-            Web3Error::from(e.to_string())
-        })?; 
-        let address = web3::types::Address::from(contract_address);
-        let contract = Contract::new(self.web3.eth(), address, contract_abi);
-        
-        let blob_settled_topic = self.get_blob_index_settled_topic();
-        let bridge_topic = self.get_bridge_event_topic();
 
-        let blob_settled_filter = FilterBuilder::default()
-            .address(vec![contract_address])
-            .topics(blob_settled_topic, None, None, None)
-            .build();
+        self.run_loop().await.map_err(|e| Web3Error::from(e.to_string()))?;
 
-        let bridge_filter = FilterBuilder::default()
-            .address(vec![contract_address])
-            .topics(bridge_topic, None, None, None)
-            .build();
+        Ok(())
+    }
 
-        let blob_settled_event = contract.abi().event("BlobIndexSettled").map_err(|e| {
-           Web3Error::from(e.to_string()) 
-        })?.clone();
+    async fn next(&mut self) -> web3::Result<Vec<ParsedLog>> {
+        let log_handler = log_handler!();
+        tokio::select!(
+            blob_settled_logs = self.web3.eth().logs(
+                self.blob_settled_filter.clone()
+            ) => {
+                return self.process_logs(
+                    EventType::Settlement(
+                        self.blob_settled_event.clone()
+                    ), blob_settled_logs, 
+                    log_handler,
+                ).await.map_err(|e| Web3Error::from(e.to_string()))
+            },
+            bridge_logs = self.web3.eth().logs(
+                self.bridge_filter.clone()
+            ) => {
+                return self.process_logs(
+                    EventType::Bridge(
+                        self.bridge_event.clone()
+                    ), bridge_logs, 
+                    log_handler,
+                ).await.map_err(|e| Web3Error::from(e.to_string()))
+            },
+        )
+    }
 
-        let bridge_event = contract.abi().event("Bridge").map_err(|e| {
-            Web3Error::from(e.to_string())
-        })?.clone();
-
+    async fn run_loop(
+        &mut self,
+    ) -> Result<(), EoServerError> {
         loop {
-            let log_handler = log_handler!();
-            tokio::select!(
-                blob_settled_logs = self.web3.eth().logs(blob_settled_filter.clone()) => {
-                    self.process_logs(EventType::Settlement(blob_settled_event.clone()), blob_settled_logs, log_handler).await;
-                },
-                bridge_logs = self.web3.eth().logs(bridge_filter.clone()) => {
-                    self.process_logs(EventType::Bridge(bridge_event.clone()), bridge_logs, log_handler).await;
-                },
-            );
+            let logs = self.next().await;
+            if let Ok(l) = logs {
+                if l.len() > 0 {
+                    log::info!("{:?}", l);
+                }
+            }
         }        
         Ok(())
     }
@@ -165,87 +194,93 @@ impl<M> EoServer<M> {
         &mut self,
         event_type: EventType,
         logs: Result<Vec<Log>, Web3Error>,
-        handler: F
-    ) -> Result<(), EoServerError> 
+        handler: F,
+    ) -> Result<Vec<ParsedLog>, EoServerError> 
     where
         F: FnOnce(Result<Vec<Log>, Web3Error>) -> Vec<Log> 
     {
         let events = handler(logs);
         match event_type {
-            EventType::Bridge(event_abi) => { self.handle_bridge_event(events, &event_abi)?; },
-            EventType::Settlement(event_abi) => { self.handle_settlement_event(events, &event_abi)?; }
+            EventType::Bridge(event_abi) => { 
+                self.handle_bridge_event(events, &event_abi) 
+            },
+            EventType::Settlement(event_abi) => { 
+                self.handle_settlement_event(events, &event_abi) 
+            }
         }
-
-        Ok(())
     }
 
-    // TODO(asmith): Handle actual events
-    async fn handle_event(&mut self, log: Log) {
-        println!("Received log: {:?}", log);
+    fn handle_bridge_event(
+        &mut self,
+        events: Vec<Log>,
+        event_abi: &web3::ethabi::Event,
+    ) -> Result<Vec<ParsedLog>, EoServerError> {
+        let mut parsed_logs = Vec::new();
+        let mut highest_block = self.inner_block_processed();
+        for event in events {
+            let block_number = event.block_number.ok_or(EoServerError::Other("Log missing block number".to_string()))?;
+            if !self.block_processed(block_number) {
+                let log = self.parse_bridge_event(event, event_abi)?;
+                parsed_logs.push(log);
+                if block_number > highest_block {
+                    highest_block = block_number;
+                }
+            }
+        }
+        self.last_processed_block = BlockNumber::Number(highest_block);
+        Ok(parsed_logs)
     }
 
-    fn handle_bridge_event(&mut self, events: Vec<Log>, event_abi: &web3::ethabi::Event) -> Result<(), EoServerError> {
+    fn handle_settlement_event(
+        &mut self,
+        events: Vec<Log>,
+        event_abi: &web3::ethabi::Event,
+    ) -> Result<Vec<ParsedLog>, EoServerError> {
+        let mut parsed_logs = Vec::new();
+        let mut highest_block = self.inner_block_processed();
         for event in events {
             let block_number = event.block_number.ok_or(EoServerError::Other("Log missing block number".to_string()))?;
             if !self.block_processed(block_number) {
                 println!("parsing bridge event");
-                self.parse_bridge_event(event, event_abi)?;
-                self.last_processed_block = BlockNumber::Number(block_number);
+                let log = self.parse_settlement_event(event, event_abi)?;
+                if block_number > highest_block {
+                    highest_block = block_number;
+                }
             }
         }
-        Ok(())
+        self.last_processed_block = BlockNumber::Number(highest_block);
+        Ok(parsed_logs)
     }
 
-    fn handle_settlement_event(&mut self, events: Vec<Log>, event_abi: &web3::ethabi::Event) -> Result<(), EoServerError> {
-        for event in events {
-            let block_number = event.block_number.ok_or(EoServerError::Other("Log missing block number".to_string()))?;
-            if !self.block_processed(block_number) {
-                println!("parsing bridge event");
-                self.parse_settlement_event(event, event_abi)?;
-                self.last_processed_block = BlockNumber::Number(block_number);
-            }
-        }
-        Ok(())
-    }
-
-    fn parse_bridge_event(&self, event: Log, event_abi: &web3::ethabi::Event) -> Result<(), EoServerError> {
+    fn parse_bridge_event(&self, event: Log, event_abi: &web3::ethabi::Event) -> Result<ParsedLog, EoServerError> {
         let parsed_log = event_abi.parse_log(
-            web3::ethabi::RawLog { 
+            RawLog { 
                 topics: event.topics.clone(), 
                 data: event.data.0.clone() 
         }).map_err(|e| EoServerError::Other(e.to_string()))?;
 
-        println!("{:?}", &parsed_log);
-        Ok(())
+        Ok(parsed_log)
     }
 
-    fn parse_settlement_event(&self, event: Log, event_abi: &web3::ethabi::Event) -> Result<(), EoServerError> {
+    fn parse_settlement_event(&self, event: Log, event_abi: &web3::ethabi::Event) -> Result<ParsedLog, EoServerError> {
         let parsed_log = event_abi.parse_log(
-            web3::ethabi::RawLog { 
+            RawLog { 
                 topics: event.topics.clone(), 
                 data: event.data.0.clone() 
         }).map_err(|e| EoServerError::Other(e.to_string()))?;
 
-        println!("{:?}", &parsed_log);
-        Ok(())
+        Ok(parsed_log)
     }
 
-    fn get_blob_index_settled_topic(&self) -> Option<Vec<H256>> {
-        let mut hasher = Keccak256::new();
-        let blob_index_settled_sig = b"BlobIndexSettled(address,bytes32,string)";
-        hasher.update(blob_index_settled_sig);
-        let res: [u8; 32] = hasher.finalize().try_into().ok()?;
-        let blob_settled_topic = H256::from(res);
-        Some(vec![blob_settled_topic])
-    }
-
-    fn get_bridge_event_topic(&self) -> Option<Vec<H256>> {
-        let mut hasher = Keccak256::new();
-        let bridge_sig = b"Bridge(address,address,uint256,uint256,string)";
-        hasher.update(bridge_sig);
-        let res: [u8; 32] = hasher.finalize().try_into().ok()?;
-        let bridge_topic = H256::from(res);
-        Some(vec![bridge_topic])
+    fn inner_block_processed(&self) -> U64 {
+        match self.last_processed_block {
+            BlockNumber::Number(bn) => {
+                return bn
+            }
+            _ => { 
+                return U64::from(0) 
+            }
+        }
     }
 
     fn block_processed(&self, block_number: U64) -> bool {
