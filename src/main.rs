@@ -1,11 +1,13 @@
-use eo_server::{
+use std::collections::BTreeSet;
+
+use eo_listener::{
     EoServerError,
     EoServerBuilder,
     EoAddress,
     get_bridge_event_topic,
     get_blob_index_settled_topic
 };
-use web3::{Web3, transports::Http, types::{BlockNumber, FilterBuilder}};
+use web3::{Web3, transports::Http, types::FilterBuilder};
 
 
 #[tokio::main]
@@ -56,7 +58,7 @@ async fn main() -> Result<(), EoServerError> {
     let mut eo_server = EoServerBuilder::default()
         .web3(web3)
         .eo_address(eo_address)
-        .last_processed_block(BlockNumber::Number(web3::types::U64([4])))
+        .processed_blocks(BTreeSet::new())
         .contract(contract)
         .bridge_filter(bridge_filter)
         .blob_settled_filter(blob_settled_filter)

@@ -9,9 +9,9 @@
 		"inputs": [
 			{
 				"indexed": true,
-				"internalType": "address",
-				"name": "user",
-				"type": "address"
+				"internalType": "address[]",
+				"name": "accounts",
+				"type": "address[]"
 			},
 			{
 				"indexed": false,
@@ -21,9 +21,15 @@
 			},
 			{
 				"indexed": false,
-				"internalType": "string",
+				"internalType": "uint128",
 				"name": "blobIndex",
-				"type": "string"
+				"type": "uint128"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "blobEventId",
+				"type": "uint256"
 			}
 		],
 		"name": "BlobIndexSettled",
@@ -61,6 +67,12 @@
 				"internalType": "string",
 				"name": "tokenType",
 				"type": "string"
+			},
+			{
+				"indexed": false,
+				"internalType": "uint256",
+				"name": "bridgeEventId",
+				"type": "uint256"
 			}
 		],
 		"name": "Bridge",
@@ -115,9 +127,9 @@
 	{
 		"inputs": [
 			{
-				"internalType": "address",
-				"name": "user",
-				"type": "address"
+				"internalType": "address[]",
+				"name": "accounts",
+				"type": "address[]"
 			},
 			{
 				"components": [
@@ -127,9 +139,9 @@
 						"type": "bytes32"
 					},
 					{
-						"internalType": "string",
+						"internalType": "uint128",
 						"name": "blobIndex",
-						"type": "string"
+						"type": "uint128"
 					}
 				],
 				"internalType": "struct ExecutableOracle.BlobIndex",
@@ -198,9 +210,9 @@
 						"type": "bytes32"
 					},
 					{
-						"internalType": "string",
+						"internalType": "uint128",
 						"name": "blobIndex",
-						"type": "string"
+						"type": "uint128"
 					}
 				],
 				"internalType": "struct ExecutableOracle.BlobIndex",
@@ -251,9 +263,9 @@
 				"type": "bytes32"
 			},
 			{
-				"internalType": "string",
+				"internalType": "uint128",
 				"name": "blobIndex",
-				"type": "string"
+				"type": "uint128"
 			}
 		],
 		"stateMutability": "view",
@@ -302,6 +314,30 @@
 				"internalType": "uint256",
 				"name": "",
 				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "address",
+				"name": "user",
+				"type": "address"
+			}
+		],
+		"name": "getBlobIndex",
+		"outputs": [
+			{
+				"internalType": "bytes32",
+				"name": "batchHeaderHash",
+				"type": "bytes32"
+			},
+			{
+				"internalType": "uint128",
+				"name": "blobIndex",
+				"type": "uint128"
 			}
 		],
 		"stateMutability": "view",

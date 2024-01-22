@@ -1,4 +1,7 @@
 #![allow(unused)]
+use std::collections::{HashSet, BTreeSet, BTreeMap};
+use std::io::{Write, Read};
+
 use derive_builder::Builder;
 use ractor::{ActorRef, Message};
 use ractor::concurrency::OneshotReceiver;
@@ -40,11 +43,15 @@ macro_rules! log_handler {
        }
     };
 }
-
+pub fn get_abi() -> Result<web3::ethabi::Contract, EoServerError> {
+    web3::ethabi::Contract::load(&include_bytes!("../eo_contract_abi.json")[..]).map_err(|e| {
+        EoServerError::Other(e.to_string())
+    }) 
+}
 
 pub fn get_blob_index_settled_topic() -> Option<Vec<H256>> {
     let mut hasher = Keccak256::new();
-    let blob_index_settled_sig = b"BlobIndexSettled(address,bytes32,string)";
+    let blob_index_settled_sig = b"BlobIndexSettled(address[],bytes32,uint128,uint256)";
     hasher.update(blob_index_settled_sig);
     let res: [u8; 32] = hasher.finalize().try_into().ok()?;
     let blob_settled_topic = H256::from(res);
@@ -53,13 +60,19 @@ pub fn get_blob_index_settled_topic() -> Option<Vec<H256>> {
 
 pub fn get_bridge_event_topic() -> Option<Vec<H256>> {
     let mut hasher = Keccak256::new();
-    let bridge_sig = b"Bridge(address,address,uint256,uint256,string)";
+    let bridge_sig = b"Bridge(address,address,uint256,uint256,string,uint256)";
     hasher.update(bridge_sig);
     let res: [u8; 32] = hasher.finalize().try_into().ok()?;
     let bridge_topic = H256::from(res);
     Some(vec![bridge_topic])
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlocksProcessed {
+    pub bridge: Option<U64>,
+    pub settle: Option<U64>,
+    pub processed: BTreeSet<U64>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SettlementLayer {
@@ -87,6 +100,12 @@ pub enum EventType {
     Settlement(web3::ethabi::Event)
 }
 
+#[derive(Clone, Debug)]
+pub struct EventLogResult {
+    pub event_type: EventType,
+    pub log_result: web3::Result<Vec<ParsedLog>>
+}
+
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct StopToken;
 
@@ -94,6 +113,7 @@ pub struct StopToken;
 pub enum EoServerError {
     Other(String)
 }
+
 
 impl From<EoServerBuilderError> for EoServerError {
     fn from(value: EoServerBuilderError) -> Self {
@@ -104,6 +124,14 @@ impl From<EoServerBuilderError> for EoServerError {
 impl std::fmt::Display for EoServerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for EoServerError {
+    fn description(&self) -> &str {
+        match self {
+            EoServerError::Other(desc) => &desc[..]
+        }
     }
 }
 
@@ -128,15 +156,41 @@ impl From<String> for ContractAddress {
 pub struct EoServer {
     web3: Web3<Http>,
     eo_address: EoAddress,
-    last_processed_block: BlockNumber,
+    processed_blocks: BTreeSet<U64>,
     contract: web3::contract::Contract<Http>,
+    bridge_topic: Option<Vec<H256>>,
+    blob_settled_topic: Option<Vec<H256>>,
     blob_settled_filter: Filter,
     bridge_filter: Filter,
+    current_bridge_filter_block: U64,
+    current_blob_settlement_filter_block: U64,
     blob_settled_event: web3::ethabi::Event,
-    bridge_event: web3::ethabi::Event
+    bridge_event: web3::ethabi::Event,
+    path: std::path::PathBuf,
 }
 
 impl EoServer {
+    pub async fn load_processed_blocks(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut buf = Vec::new();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&self.path)?;
+
+        file.read_to_end(&mut buf)?;
+
+        let blocks_processed: BlocksProcessed = bincode::deserialize(&buf)?;
+        if let Some(b) = blocks_processed.bridge {
+            self.current_bridge_filter_block = b;
+        }
+
+        if let Some(b) = blocks_processed.settle {
+            self.current_blob_settlement_filter_block = b;
+        }
+
+        self.processed_blocks = blocks_processed.processed;
+
+        Ok(())
+    }
     /// The core method of this struct, opens up a listener 
     /// and listens for specific events from the Ethereum Executable 
     /// oracle contract, it then `handles` the events, which is to 
@@ -150,38 +204,47 @@ impl EoServer {
         Ok(())
     }
 
-    async fn next(&mut self) -> web3::Result<Vec<ParsedLog>> {
+    pub async fn next(&mut self) -> EventLogResult {
         let log_handler = log_handler!();
         tokio::select!(
             blob_settled_logs = self.web3.eth().logs(
                 self.blob_settled_filter.clone()
             ) => {
-                return self.process_logs(
+                let log_result = self.process_logs(
                     EventType::Settlement(
                         self.blob_settled_event.clone()
                     ), blob_settled_logs, 
                     log_handler,
-                ).await.map_err(|e| Web3Error::from(e.to_string()))
+                ).await.map_err(|e| Web3Error::from(e.to_string()));
+
+                return EventLogResult {
+                    event_type: EventType::Settlement(self.blob_settled_event.clone()),
+                    log_result
+                };
             },
             bridge_logs = self.web3.eth().logs(
                 self.bridge_filter.clone()
             ) => {
-                return self.process_logs(
+                let log_result = self.process_logs(
                     EventType::Bridge(
                         self.bridge_event.clone()
                     ), bridge_logs, 
                     log_handler,
-                ).await.map_err(|e| Web3Error::from(e.to_string()))
+                ).await.map_err(|e| Web3Error::from(e.to_string()));
+                return EventLogResult {
+                    event_type: EventType::Bridge(self.bridge_event.clone()),
+                    log_result
+                };
             },
         )
     }
 
     async fn run_loop(
         &mut self,
-    ) -> Result<(), EoServerError> {
+    ) -> Result<(), web3::Error>{
         loop {
             let logs = self.next().await;
-            if let Ok(l) = logs {
+            if let Ok(l) = logs.log_result {
                 if l.len() > 0 {
                     log::info!("{:?}", l);
                 }
@@ -199,13 +262,22 @@ impl EoServer {
     where
         F: FnOnce(Result<Vec<Log>, Web3Error>) -> Vec<Log> 
     {
+
+        let block_number = self.web3.eth().block_number().await.map_err(|e| {
+            EoServerError::Other(format!("Error attempting to get block number: {}", e))
+        })?;
+
         let events = handler(logs);
         match event_type {
             EventType::Bridge(event_abi) => { 
-                self.handle_bridge_event(events, &event_abi) 
+                let bridge_log = self.handle_bridge_event(events, &event_abi); 
+                self.increment_bridge_filter(block_number);
+                return bridge_log
             },
             EventType::Settlement(event_abi) => { 
-                self.handle_settlement_event(events, &event_abi) 
+                let blob_log = self.handle_settlement_event(events, &event_abi);
+                self.increment_blob_filter(block_number);
+                return blob_log
             }
         }
     }
@@ -216,18 +288,14 @@ impl EoServer {
         event_abi: &web3::ethabi::Event,
     ) -> Result<Vec<ParsedLog>, EoServerError> {
         let mut parsed_logs = Vec::new();
-        let mut highest_block = self.inner_block_processed();
+        let mut blocks_processed = Vec::new();
         for event in events {
             let block_number = event.block_number.ok_or(EoServerError::Other("Log missing block number".to_string()))?;
-            if !self.block_processed(block_number) {
-                let log = self.parse_bridge_event(event, event_abi)?;
-                parsed_logs.push(log);
-                if block_number > highest_block {
-                    highest_block = block_number;
-                }
-            }
+            let log = self.parse_bridge_event(event, event_abi)?;
+            parsed_logs.push(log);
+            blocks_processed.push(block_number);
         }
-        self.last_processed_block = BlockNumber::Number(highest_block);
+        self.processed_blocks.extend(blocks_processed);
         Ok(parsed_logs)
     }
 
@@ -237,18 +305,14 @@ impl EoServer {
         event_abi: &web3::ethabi::Event,
     ) -> Result<Vec<ParsedLog>, EoServerError> {
         let mut parsed_logs = Vec::new();
-        let mut highest_block = self.inner_block_processed();
+        let mut blocks_processed = Vec::new();
         for event in events {
             let block_number = event.block_number.ok_or(EoServerError::Other("Log missing block number".to_string()))?;
-            if !self.block_processed(block_number) {
-                println!("parsing bridge event");
-                let log = self.parse_settlement_event(event, event_abi)?;
-                if block_number > highest_block {
-                    highest_block = block_number;
-                }
-            }
+            let log = self.parse_settlement_event(event, event_abi)?;
+            parsed_logs.push(log);
+            blocks_processed.push(block_number);
         }
-        self.last_processed_block = BlockNumber::Number(highest_block);
+        self.processed_blocks.extend(blocks_processed);
         Ok(parsed_logs)
     }
 
@@ -272,26 +336,92 @@ impl EoServer {
         Ok(parsed_log)
     }
 
-    fn inner_block_processed(&self) -> U64 {
-        match self.last_processed_block {
-            BlockNumber::Number(bn) => {
-                return bn
-            }
-            _ => { 
-                return U64::from(0) 
-            }
+    fn increment_bridge_filter(&mut self, block_number: U64) -> Result<(), Box<dyn std::error::Error>> {
+        let contract_address = self.eo_address.clone().parse().map_err(|err| {
+            EoServerError::Other(err.to_string())
+        })?;
+
+        let default: U64 = U64::from(0);
+        let highest_processed_block = self.processed_blocks.last().unwrap_or_else(|| &default);
+        
+        let from_block = std::cmp::min(
+            self.current_bridge_filter_block, 
+            (highest_processed_block.clone() + 1)
+        );
+
+        let new_filter = FilterBuilder::default()
+            .from_block(BlockNumber::Number(from_block)) // Last processed block
+            .to_block(BlockNumber::Number(self.current_bridge_filter_block))
+            .address(vec![contract_address])
+            .topics(self.bridge_topic.clone(), None, None, None)
+            .build();
+
+        self.bridge_filter = new_filter;
+
+        if self.current_bridge_filter_block + 1 > block_number {
+            self.current_bridge_filter_block = block_number + 1;
+        } else {
+            self.current_bridge_filter_block += 1.into();
         }
+
+        Ok(())
     }
 
-    fn block_processed(&self, block_number: U64) -> bool {
-        match self.last_processed_block {
-            BlockNumber::Number(bn) => {
-                return block_number <= bn
-            }
-            _ => { 
-                return false
-            }
+    fn increment_blob_filter(&mut self, block_number: U64) -> Result<(), Box<dyn std::error::Error>> {
+        let contract_address = self.eo_address.clone().parse().map_err(|err| {
+            EoServerError::Other(err.to_string())
+        })?;
+
+        let default: U64 = U64::from(0);
+        let highest_processed_block = self.processed_blocks.last().unwrap_or_else(|| &default);
+        
+        let from_block = std::cmp::min(
+            self.current_bridge_filter_block, 
+            (highest_processed_block.clone() + 1)
+        );
+
+        let new_filter = FilterBuilder::default()
+            .from_block(BlockNumber::Number(from_block))
+            .to_block(BlockNumber::Number(self.current_bridge_filter_block))
+            .address(vec![contract_address])
+            .topics(self.blob_settled_topic.clone(), None, None, None)
+            .build();
+
+        if self.current_bridge_filter_block + 1 > block_number {
+            self.current_bridge_filter_block = block_number + 1;
+        } else {
+            self.current_bridge_filter_block += 1.into();
         }
+
+        Ok(())
+    }
+
+    fn inner_highest_block_processed(&self) -> Option<&U64> {
+        self.processed_blocks.last()
+    }
+
+    fn inner_highest_block_processed_owned(&self) -> Option<U64> {
+        if let Some(b) = self.processed_blocks.last() {
+            return Some(b.clone())
+        }
+
+        None
+    }
+
+    fn inner_lowest_block_processed(&self) -> Option<&U64> {
+        self.processed_blocks.first()
+    }
+
+    fn inner_lowest_block_processed_owned(&self) -> Option<U64> {
+        if let Some(b) = self.processed_blocks.first() {
+            return Some(b.clone())
+        }
+
+        None
+    }
+
+    fn block_processed(&self, block_number: &U64) -> bool {
+        self.processed_blocks.contains(block_number)
     }
 
     async fn get_account_balance_eth(
@@ -356,6 +486,29 @@ impl EoServer {
         }
 
         Ok(results)
+    }
+
+    pub fn contract(&self) -> &Contract<Http> {
+        &self.contract
+    }
+
+    pub fn save_blocks_processed(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let blocks_processed = BlocksProcessed {
+            bridge: Some(self.current_bridge_filter_block.clone()),
+            settle: Some(self.current_blob_settlement_filter_block.clone()),
+            processed: self.processed_blocks.clone()
+        };
+
+        let bytes = bincode::serialize(&blocks_processed)?;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&self.path)?;
+
+        file.write(&bytes)?;
+
+        Ok(())
     }
 }
 
