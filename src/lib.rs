@@ -106,6 +106,14 @@ pub struct EventLogResult {
     pub log_result: web3::Result<Vec<ParsedLog>>
 }
 
+#[async_trait::async_trait]
+pub trait RpcServer: Clone {
+    type Item;
+
+    async fn pending(&mut self) -> Vec<Self::Item>;
+    async fn read(&mut self) -> Self::Item;
+}
+
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct StopToken;
 
@@ -113,7 +121,6 @@ pub struct StopToken;
 pub enum EoServerError {
     Other(String)
 }
-
 
 impl From<EoServerBuilderError> for EoServerError {
     fn from(value: EoServerBuilderError) -> Self {
@@ -151,6 +158,7 @@ impl From<String> for ContractAddress {
 }
 
 /// An ExecutableOracle server that listens for events emitted from 
+<<<<<<< HEAD
 /// Smart Contracts
 #[derive(Builder, Debug, Clone)]
 pub struct EoServer {
@@ -243,10 +251,22 @@ impl EoServer {
         &mut self,
     ) -> Result<(), web3::Error>{
         loop {
-            let logs = self.next().await;
-            if let Ok(l) = logs.log_result {
-                if l.len() > 0 {
-                    log::info!("{:?}", l);
+            if let Ok(_) = rx.try_recv() {
+                break;
+            }
+            
+            tokio::select! {
+                logs = self.web3.eth().logs(filter.clone()) => {
+                    match logs {
+                        Ok(log) => {
+                            for log in log {
+                                self.handle_event(log).await;
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                },
+                transactions = self.pending() => {
                 }
             }
         }        
@@ -422,6 +442,14 @@ impl EoServer {
 
     fn block_processed(&self, block_number: &U64) -> bool {
         self.processed_blocks.contains(block_number)
+    }
+
+    async fn rpc(&mut self) -> &mut S {
+        &mut self.rpc
+    }
+
+    async fn pending(&mut self) -> Vec<<S as RpcServer>::Item> { 
+        self.rpc.pending().await
     }
 
     async fn get_account_balance_eth(
