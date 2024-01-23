@@ -3,18 +3,17 @@ use std::collections::{HashSet, BTreeSet, BTreeMap};
 use std::io::{Write, Read};
 
 use derive_builder::Builder;
-use ractor::{ActorRef, Message};
-use ractor::concurrency::OneshotReceiver;
 use tokio::sync::{oneshot::Receiver, mpsc::UnboundedSender};
 use tokio::sync::mpsc::UnboundedReceiver;
 use serde::{Serialize, Deserialize};
-use web3::ethabi::{RawLog, Log as ParsedLog};
-use web3::types::{U64, Filter};
+use web3::types::U64;
 use web3::{
     Error as Web3Error,
     Web3, 
     transports::Http, 
+    ethabi::RawLog as ParsedLog,
     types::{
+        Filter,
         FilterBuilder,
         H160,
         H256,
@@ -103,15 +102,7 @@ pub enum EventType {
 #[derive(Clone, Debug)]
 pub struct EventLogResult {
     pub event_type: EventType,
-    pub log_result: web3::Result<Vec<ParsedLog>>
-}
-
-#[async_trait::async_trait]
-pub trait RpcServer: Clone {
-    type Item;
-
-    async fn pending(&mut self) -> Vec<Self::Item>;
-    async fn read(&mut self) -> Self::Item;
+    pub log_result: web3::Result<Vec<web3::ethabi::Log>>
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
@@ -158,7 +149,6 @@ impl From<String> for ContractAddress {
 }
 
 /// An ExecutableOracle server that listens for events emitted from 
-<<<<<<< HEAD
 /// Smart Contracts
 #[derive(Builder, Debug, Clone)]
 pub struct EoServer {
@@ -199,17 +189,9 @@ impl EoServer {
 
         Ok(())
     }
-    /// The core method of this struct, opens up a listener 
-    /// and listens for specific events from the Ethereum Executable 
-    /// oracle contract, it then `handles` the events, which is to 
-    /// say it schedules tasks to be executed in the Versatus network
-    pub async fn run(
-        &mut self,
-    ) -> web3::Result<()> {
 
-        self.run_loop().await.map_err(|e| Web3Error::from(e.to_string()))?;
-
-        Ok(())
+    pub async fn run(mut self) -> Result<(), web3::Error> {
+        self.run_loop().await
     }
 
     pub async fn next(&mut self) -> EventLogResult {
@@ -249,26 +231,25 @@ impl EoServer {
 
     async fn run_loop(
         &mut self,
-    ) -> Result<(), web3::Error>{
+    ) -> Result<(), web3::Error> {
+        let blob_settled_event = self.contract.abi().event("BlobIndexSettled").map_err(|e| {
+           Web3Error::from(e.to_string()) 
+        })?.clone();
+
+        let bridge_event = self.contract.abi().event("Bridge").map_err(|e| {
+            Web3Error::from(e.to_string())
+        })?.clone();
+
         loop {
-            if let Ok(_) = rx.try_recv() {
-                break;
-            }
-            
-            tokio::select! {
-                logs = self.web3.eth().logs(filter.clone()) => {
-                    match logs {
-                        Ok(log) => {
-                            for log in log {
-                                self.handle_event(log).await;
-                            }
-                        }
-                        Err(_) => {}
-                    }
+            let log_handler = log_handler!();
+            tokio::select!(
+                blob_settled_logs = self.web3.eth().logs(self.blob_settled_filter.clone()) => {
+                    self.process_logs(EventType::Settlement(blob_settled_event.clone()), blob_settled_logs, log_handler).await;
                 },
-                transactions = self.pending() => {
-                }
-            }
+                bridge_logs = self.web3.eth().logs(self.bridge_filter.clone()) => {
+                    self.process_logs(EventType::Bridge(bridge_event.clone()), bridge_logs, log_handler).await;
+                },
+            );
         }        
         Ok(())
     }
@@ -277,8 +258,8 @@ impl EoServer {
         &mut self,
         event_type: EventType,
         logs: Result<Vec<Log>, Web3Error>,
-        handler: F,
-    ) -> Result<Vec<ParsedLog>, EoServerError> 
+        handler: F
+    ) -> Result<Vec<web3::ethabi::Log>, EoServerError> 
     where
         F: FnOnce(Result<Vec<Log>, Web3Error>) -> Vec<Log> 
     {
@@ -300,13 +281,15 @@ impl EoServer {
                 return blob_log
             }
         }
+
+        Ok(vec![])
     }
 
     fn handle_bridge_event(
         &mut self,
         events: Vec<Log>,
         event_abi: &web3::ethabi::Event,
-    ) -> Result<Vec<ParsedLog>, EoServerError> {
+    ) -> Result<Vec<web3::ethabi::Log>, EoServerError> {
         let mut parsed_logs = Vec::new();
         let mut blocks_processed = Vec::new();
         for event in events {
@@ -323,7 +306,7 @@ impl EoServer {
         &mut self,
         events: Vec<Log>,
         event_abi: &web3::ethabi::Event,
-    ) -> Result<Vec<ParsedLog>, EoServerError> {
+    ) -> Result<Vec<web3::ethabi::Log>, EoServerError> {
         let mut parsed_logs = Vec::new();
         let mut blocks_processed = Vec::new();
         for event in events {
@@ -336,23 +319,25 @@ impl EoServer {
         Ok(parsed_logs)
     }
 
-    fn parse_bridge_event(&self, event: Log, event_abi: &web3::ethabi::Event) -> Result<ParsedLog, EoServerError> {
+    fn parse_bridge_event(&self, event: Log, event_abi: &web3::ethabi::Event) -> Result<web3::ethabi::Log, EoServerError> {
         let parsed_log = event_abi.parse_log(
-            RawLog { 
+            web3::ethabi::RawLog { 
                 topics: event.topics.clone(), 
                 data: event.data.0.clone() 
         }).map_err(|e| EoServerError::Other(e.to_string()))?;
 
+        println!("{:?}", &parsed_log);
         Ok(parsed_log)
     }
 
-    fn parse_settlement_event(&self, event: Log, event_abi: &web3::ethabi::Event) -> Result<ParsedLog, EoServerError> {
+    fn parse_settlement_event(&self, event: Log, event_abi: &web3::ethabi::Event) -> Result<web3::ethabi::Log, EoServerError> {
         let parsed_log = event_abi.parse_log(
-            RawLog { 
+            web3::ethabi::RawLog { 
                 topics: event.topics.clone(), 
                 data: event.data.0.clone() 
         }).map_err(|e| EoServerError::Other(e.to_string()))?;
 
+        println!("{:?}", &parsed_log);
         Ok(parsed_log)
     }
 
@@ -442,14 +427,6 @@ impl EoServer {
 
     fn block_processed(&self, block_number: &U64) -> bool {
         self.processed_blocks.contains(block_number)
-    }
-
-    async fn rpc(&mut self) -> &mut S {
-        &mut self.rpc
-    }
-
-    async fn pending(&mut self) -> Vec<<S as RpcServer>::Item> { 
-        self.rpc.pending().await
     }
 
     async fn get_account_balance_eth(
