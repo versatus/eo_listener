@@ -384,11 +384,6 @@ impl EoServer {
             (highest_processed_block.clone() + 1)
         );
 
-        if from_block % U64::from(100) == U64::from(0) {
-            println!("incrementing filter to block: {}", from_block);
-        }
-
-
         let new_filter = FilterBuilder::default()
             .from_block(BlockNumber::Number(self.current_blob_settlement_filter_block))
             .address(vec![contract_address])
