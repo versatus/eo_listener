@@ -354,8 +354,13 @@ impl EoServer {
             (highest_processed_block.clone() + 1)
         );
 
+        if from_block % U64::from(100) == U64::from(0) {
+            println!("incrementing filter to block: {}", from_block);
+        }
+
         let new_filter = FilterBuilder::default()
-            .from_block(BlockNumber::Number(self.current_bridge_filter_block)) // Last processed block
+            .from_block(BlockNumber::Number(from_block)) // Last processed block
+            .to_block(BlockNumber::Number(self.current_bridge_filter_block))
             .address(vec![contract_address])
             .topics(self.bridge_topic.clone(), None, None, None)
             .build();
@@ -385,7 +390,8 @@ impl EoServer {
         );
 
         let new_filter = FilterBuilder::default()
-            .from_block(BlockNumber::Number(self.current_blob_settlement_filter_block))
+            .from_block(BlockNumber::Number(from_block))
+            .to_block(BlockNumber::Number(self.current_bridge_filter_block))
             .address(vec![contract_address])
             .topics(self.blob_settled_topic.clone(), None, None, None)
             .build();
