@@ -195,6 +195,7 @@ impl EoServer {
     }
 
     pub async fn next(&mut self) -> EventLogResult {
+        let _ = self.load_processed_blocks().await;
         let log_handler = log_handler!();
         tokio::select!(
             blob_settled_logs = self.web3.eth().logs(
