@@ -1,4 +1,4 @@
-use eo_server::{
+use eo_listener::{
     get_blob_index_settled_topic, get_bridge_event_topic, EoAddress, EoServer, EoServerBuilder,
     EoServerError,
 };
@@ -9,8 +9,9 @@ use web3::{transports::Http, types::BlockNumber, Web3};
 #[tokio::main]
 async fn main() -> Result<(), EoServerError> {
     // Initialize Web3 Transport
+    //https://u0bddpyrvy:wUYnFGT8qmldV1KsTPoEwo04cVjvVbBFE26pl5rZ_c8@u0v4deab9j-u0ghk9j0sc-rpc.us0-aws.kaleido.io/
     let http: Http =
-        Http::new("http://127.0.0.1:8545").map_err(|err| EoServerError::Other(err.to_string()))?;
+        Http::new("https://u0bddpyrvy:wUYnFGT8qmldV1KsTPoEwo04cVjvVbBFE26pl5rZ_c8@u0v4deab9j-u0ghk9j0sc-rpc.us0-aws.kaleido.io").map_err(|err| EoServerError::Other(err.to_string()))?;
 
     // Initialize the ExecutableOracle Address
     // let eo_address = EoAddress::new("0x610178dA211FEF7D417bC0e6FeD39F05609AD788");
@@ -18,7 +19,7 @@ async fn main() -> Result<(), EoServerError> {
     let web3: Web3<Http> = Web3::new(http);
 
     let path = "./blocks_processed.dat";
-    let mut eo_server = setup_eo_server(web3, path)?;
+    let eo_server = setup_eo_server(web3, path)?;
 
     let res = eo_server.run().await;
     println!("{:?}", &res);
@@ -31,29 +32,28 @@ fn setup_eo_server(
     path: &str,
 ) -> Result<EoServer, EoServerError> {
     // Initialize the ExecutableOracle Address
-    //0x5FbDB2315678afecb367f032d93F642f64180aa3
     let eo_address_str = std::env::var("EO_CONTRACT_ADDRESS").expect("EO_CONTRACT_ADDRESS environment variable is not set. Please set the EO_CONTRACT_ADDRESS environment variable with the Executable Oracle contract address.");
-    let eo_address = eo_server::EoAddress::new(&eo_address_str);
+    let eo_address = eo_listener::EoAddress::new(&eo_address_str);
     let contract_address = eo_address
         .parse()
         .map_err(|err| EoServerError::Other(err.to_string()))?;
-    let contract_abi = eo_server::get_abi()?;
+    let contract_abi = eo_listener::get_abi()?;
     let address = web3::types::Address::from(contract_address);
     let contract = web3::contract::Contract::new(web3_instance.eth(), address, contract_abi);
 
-    let blob_settled_topic = eo_server::get_blob_index_settled_topic();
-    let bridge_topic = eo_server::get_bridge_event_topic();
+    let blob_settled_topic = eo_listener::get_blob_index_settled_topic();
+    let bridge_topic = eo_listener::get_bridge_event_topic();
 
     let blob_settled_filter = web3::types::FilterBuilder::default()
         .from_block(BlockNumber::Number(0.into()))
-        .to_block(BlockNumber::Number(0.into()))
+        .to_block(BlockNumber::Latest)
         .address(vec![contract_address])
         .topics(blob_settled_topic.clone(), None, None, None)
         .build();
 
     let bridge_filter = web3::types::FilterBuilder::default()
         .from_block(BlockNumber::Number(0.into()))
-        .to_block(BlockNumber::Number(0.into()))
+        .to_block(BlockNumber::Latest)
         .address(vec![contract_address])
         .topics(bridge_topic.clone(), None, None, None)
         .build();
@@ -70,10 +70,11 @@ fn setup_eo_server(
         .map_err(|e| EoServerError::Other(e.to_string()))?
         .clone();
 
-    let eo_server = eo_server::EoServerBuilder::default()
+    let eo_server = eo_listener::EoServerBuilder::default()
         .web3(web3_instance)
         .eo_address(eo_address)
-        .processed_blocks(BTreeSet::new())
+        .bridge_processed_blocks(BTreeSet::new())
+        .settled_processed_blocks(BTreeSet::new())
         .contract(contract)
         .bridge_topic(bridge_topic)
         .blob_settled_topic(blob_settled_topic)

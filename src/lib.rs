@@ -70,7 +70,8 @@ pub fn get_bridge_event_topic() -> Option<Vec<H256>> {
 pub struct BlocksProcessed {
     pub bridge: Option<U64>,
     pub settle: Option<U64>,
-    pub processed: BTreeSet<U64>,
+    pub bridge_processed: BTreeSet<U64>,
+    pub settled_processed: BTreeSet<U64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -154,7 +155,8 @@ impl From<String> for ContractAddress {
 pub struct EoServer {
     web3: Web3<Http>,
     eo_address: EoAddress,
-    processed_blocks: BTreeSet<U64>,
+    bridge_processed_blocks: BTreeSet<U64>,
+    settled_processed_blocks: BTreeSet<U64>,
     contract: web3::contract::Contract<Http>,
     bridge_topic: Option<Vec<H256>>,
     blob_settled_topic: Option<Vec<H256>>,
@@ -185,7 +187,8 @@ impl EoServer {
             self.current_blob_settlement_filter_block = b;
         }
 
-        self.processed_blocks = blocks_processed.processed;
+        self.bridge_processed_blocks = blocks_processed.bridge_processed;
+        self.settled_processed_blocks = blocks_processed.settled_processed;
 
         Ok(())
     }
@@ -195,7 +198,6 @@ impl EoServer {
     }
 
     pub async fn next(&mut self) -> EventLogResult {
-        let _ = self.load_processed_blocks().await;
         let log_handler = log_handler!();
         tokio::select!(
             blob_settled_logs = self.web3.eth().logs(
@@ -299,7 +301,7 @@ impl EoServer {
             parsed_logs.push(log);
             blocks_processed.push(block_number);
         }
-        self.processed_blocks.extend(blocks_processed);
+        self.bridge_processed_blocks.extend(blocks_processed);
         Ok(parsed_logs)
     }
 
@@ -316,7 +318,7 @@ impl EoServer {
             parsed_logs.push(log);
             blocks_processed.push(block_number);
         }
-        self.processed_blocks.extend(blocks_processed);
+        self.settled_processed_blocks.extend(blocks_processed);
         Ok(parsed_logs)
     }
 
@@ -326,8 +328,6 @@ impl EoServer {
                 topics: event.topics.clone(), 
                 data: event.data.0.clone() 
         }).map_err(|e| EoServerError::Other(e.to_string()))?;
-
-        println!("{:?}", &parsed_log);
         Ok(parsed_log)
     }
 
@@ -338,7 +338,6 @@ impl EoServer {
                 data: event.data.0.clone() 
         }).map_err(|e| EoServerError::Other(e.to_string()))?;
 
-        println!("{:?}", &parsed_log);
         Ok(parsed_log)
     }
 
@@ -348,31 +347,17 @@ impl EoServer {
         })?;
 
         let default: U64 = U64::from(0);
-        let highest_processed_block = self.processed_blocks.last().unwrap_or_else(|| &default);
-        
-        let from_block = std::cmp::min(
-            self.current_bridge_filter_block, 
-            (highest_processed_block.clone() + 1)
-        );
-
-        if from_block % U64::from(100) == U64::from(0) {
-            println!("incrementing filter to block: {}", from_block);
-        }
+        let highest_processed_block = self.bridge_processed_blocks.last().unwrap_or_else(|| &default);
+        let from_block = highest_processed_block.clone() + U64::from(1);
 
         let new_filter = FilterBuilder::default()
             .from_block(BlockNumber::Number(from_block)) // Last processed block
-            .to_block(BlockNumber::Number(self.current_bridge_filter_block))
+            .to_block(BlockNumber::Latest)
             .address(vec![contract_address])
             .topics(self.bridge_topic.clone(), None, None, None)
             .build();
 
         self.bridge_filter = new_filter;
-
-        if self.current_bridge_filter_block + 1 > block_number {
-            self.current_bridge_filter_block = block_number + 1;
-        } else {
-            self.current_bridge_filter_block += 1.into();
-        }
 
         Ok(())
     }
@@ -383,55 +368,47 @@ impl EoServer {
         })?;
 
         let default: U64 = U64::from(0);
-        let highest_processed_block = self.processed_blocks.last().unwrap_or_else(|| &default);
-        
-        let from_block = std::cmp::min(
-            self.current_bridge_filter_block, 
-            (highest_processed_block.clone() + 1)
-        );
+        let highest_processed_block = self.settled_processed_blocks.last().unwrap_or_else(|| &default);
+        let from_block = highest_processed_block + U64::from(1);
 
         let new_filter = FilterBuilder::default()
             .from_block(BlockNumber::Number(from_block))
-            .to_block(BlockNumber::Number(self.current_bridge_filter_block))
+            .to_block(BlockNumber::Latest)
             .address(vec![contract_address])
             .topics(self.blob_settled_topic.clone(), None, None, None)
             .build();
 
-        if self.current_bridge_filter_block + 1 > block_number {
-            self.current_bridge_filter_block = block_number + 1;
-        } else {
-            self.current_bridge_filter_block += 1.into();
-        }
+        self.blob_settled_filter = new_filter;
 
         Ok(())
     }
 
-    fn inner_highest_block_processed(&self) -> Option<&U64> {
-        self.processed_blocks.last()
+    fn inner_highest_bridge_block_processed(&self) -> Option<&U64> {
+        self.bridge_processed_blocks.last()
     }
 
-    fn inner_highest_block_processed_owned(&self) -> Option<U64> {
-        if let Some(b) = self.processed_blocks.last() {
+    fn inner_highest_bridge_block_processed_owned(&self) -> Option<U64> {
+        if let Some(b) = self.bridge_processed_blocks.last() {
             return Some(b.clone())
         }
 
         None
     }
 
-    fn inner_lowest_block_processed(&self) -> Option<&U64> {
-        self.processed_blocks.first()
+    fn inner_lowest_bridge_block_processed(&self) -> Option<&U64> {
+        self.bridge_processed_blocks.first()
     }
 
-    fn inner_lowest_block_processed_owned(&self) -> Option<U64> {
-        if let Some(b) = self.processed_blocks.first() {
+    fn inner_lowest_bridge_block_processed_owned(&self) -> Option<U64> {
+        if let Some(b) = self.bridge_processed_blocks.first() {
             return Some(b.clone())
         }
 
         None
     }
 
-    fn block_processed(&self, block_number: &U64) -> bool {
-        self.processed_blocks.contains(block_number)
+    fn bridge_block_processed(&self, block_number: &U64) -> bool {
+        self.bridge_processed_blocks.contains(block_number)
     }
 
     async fn get_account_balance_eth(
@@ -506,7 +483,8 @@ impl EoServer {
         let blocks_processed = BlocksProcessed {
             bridge: Some(self.current_bridge_filter_block.clone()),
             settle: Some(self.current_blob_settlement_filter_block.clone()),
-            processed: self.processed_blocks.clone()
+            bridge_processed: self.bridge_processed_blocks.clone(),
+            settled_processed: self.settled_processed_blocks.clone()
         };
 
         let bytes = bincode::serialize(&blocks_processed)?;
