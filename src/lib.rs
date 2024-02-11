@@ -198,6 +198,7 @@ impl EoServer {
     }
 
     pub async fn next(&mut self) -> EventLogResult {
+
         let log_handler = log_handler!();
         tokio::select!(
             blob_settled_logs = self.web3.eth().logs(
@@ -270,6 +271,8 @@ impl EoServer {
         let block_number = self.web3.eth().block_number().await.map_err(|e| {
             EoServerError::Other(format!("Error attempting to get block number: {}", e))
         })?;
+
+        log::info!("Current block number: {}", block_number);
 
         let events = handler(logs);
         match event_type {
@@ -349,7 +352,7 @@ impl EoServer {
         let default: U64 = U64::from(0);
         let highest_processed_block = self.bridge_processed_blocks.last().unwrap_or_else(|| &default);
         let from_block = highest_processed_block.clone() + U64::from(1);
-        log::info!("Highest processed blridge block: {}", &from_block);
+        log::info!("Highest processed bridge block: {}", &from_block);
 
         let new_filter = FilterBuilder::default()
             .from_block(BlockNumber::Number(from_block)) // Last processed block
