@@ -349,6 +349,7 @@ impl EoServer {
         let default: U64 = U64::from(0);
         let highest_processed_block = self.bridge_processed_blocks.last().unwrap_or_else(|| &default);
         let from_block = highest_processed_block.clone() + U64::from(1);
+        log::info!("Highest processed blridge block: {}", &from_block);
 
         let new_filter = FilterBuilder::default()
             .from_block(BlockNumber::Number(from_block)) // Last processed block
