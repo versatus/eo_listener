@@ -9,13 +9,8 @@ use web3::{transports::Http, types::BlockNumber, Web3};
 #[tokio::main]
 async fn main() -> Result<(), EoServerError> {
     // Initialize Web3 Transport
-    //https://u0bddpyrvy:wUYnFGT8qmldV1KsTPoEwo04cVjvVbBFE26pl5rZ_c8@u0v4deab9j-u0ghk9j0sc-rpc.us0-aws.kaleido.io/
     let http: Http =
-        Http::new("https://u0bddpyrvy:wUYnFGT8qmldV1KsTPoEwo04cVjvVbBFE26pl5rZ_c8@u0v4deab9j-u0ghk9j0sc-rpc.us0-aws.kaleido.io").map_err(|err| EoServerError::Other(err.to_string()))?;
-
-    // Initialize the ExecutableOracle Address
-    // let eo_address = EoAddress::new("0x610178dA211FEF7D417bC0e6FeD39F05609AD788");
-    // Initialize the web3 instance
+        Http::new("https://u0sb67wcu2:oqyk-7M8zc7F08HkDr48_Bk1TuZIcjzpC9on7ST-yWQ@u0d79gh32z-u0o7pt95od-rpc.us0-aws.kaleido.io/").map_err(|err| EoServerError::Other(err.to_string()))?;
     let web3: Web3<Http> = Web3::new(http);
 
     let path = "./blocks_processed.dat";
@@ -33,6 +28,7 @@ fn setup_eo_server(
 ) -> Result<EoServer, EoServerError> {
     // Initialize the ExecutableOracle Address
     let eo_address_str = std::env::var("EO_CONTRACT_ADDRESS").expect("EO_CONTRACT_ADDRESS environment variable is not set. Please set the EO_CONTRACT_ADDRESS environment variable with the Executable Oracle contract address.");
+    println!("{}", &eo_address_str);
     let eo_address = eo_listener::EoAddress::new(&eo_address_str);
     let contract_address = eo_address
         .parse()
@@ -73,6 +69,7 @@ fn setup_eo_server(
     let eo_server = eo_listener::EoServerBuilder::default()
         .web3(web3_instance)
         .eo_address(eo_address)
+        .block_time(std::time::Duration::from_millis(2500))
         .bridge_processed_blocks(BTreeSet::new())
         .settled_processed_blocks(BTreeSet::new())
         .contract(contract)
