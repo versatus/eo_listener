@@ -1,6 +1,7 @@
 #![allow(unused)]
 use std::collections::{HashSet, BTreeSet, BTreeMap};
 use std::io::{Write, Read};
+use std::time::Duration;
 
 use derive_builder::Builder;
 use tokio::sync::{oneshot::Receiver, mpsc::UnboundedSender};
@@ -155,6 +156,7 @@ impl From<String> for ContractAddress {
 pub struct EoServer {
     web3: Web3<Http>,
     eo_address: EoAddress,
+    block_time: Duration,
     bridge_processed_blocks: BTreeSet<U64>,
     settled_processed_blocks: BTreeSet<U64>,
     contract: web3::contract::Contract<Http>,
@@ -250,9 +252,14 @@ impl EoServer {
                     self.process_logs(EventType::Settlement(blob_settled_event.clone()), blob_settled_logs, log_handler).await;
                 },
                 bridge_logs = self.web3.eth().logs(self.bridge_filter.clone()) => {
-                    self.process_logs(EventType::Bridge(bridge_event.clone()), bridge_logs, log_handler).await;
+                    self.process_logs(
+                        EventType::Bridge(
+                            bridge_event.clone()
+                        ), bridge_logs, log_handler
+                    ).await;
                 },
             );
+            tokio::time::sleep(self.block_time).await;
         }        
         Ok(())
     }
@@ -266,7 +273,6 @@ impl EoServer {
     where
         F: FnOnce(Result<Vec<Log>, Web3Error>) -> Vec<Log> 
     {
-
         let block_number = self.web3.eth().block_number().await.map_err(|e| {
             EoServerError::Other(format!("Error attempting to get block number: {}", e))
         })?;
@@ -275,12 +281,25 @@ impl EoServer {
         match event_type {
             EventType::Bridge(event_abi) => { 
                 let bridge_log = self.handle_bridge_event(events, &event_abi); 
-                self.increment_bridge_filter(block_number);
+                if let Ok(logs) = &bridge_log {
+                    dbg!(logs);
+                    if logs.len() > 0 {
+                        self.increment_bridge_filter(block_number, true);
+                    } else {
+                        self.increment_bridge_filter(block_number, false);
+                    }
+                }
                 return bridge_log
             },
             EventType::Settlement(event_abi) => { 
                 let blob_log = self.handle_settlement_event(events, &event_abi);
-                self.increment_blob_filter(block_number);
+                if let Ok(logs) = &blob_log {
+                    if logs.len() > 0 {
+                        self.increment_blob_filter(block_number, true);
+                    } else {
+                        self.increment_blob_filter(block_number, false);
+                    }
+                }
                 return blob_log
             }
         }
@@ -341,42 +360,52 @@ impl EoServer {
         Ok(parsed_log)
     }
 
-    fn increment_bridge_filter(&mut self, block_number: U64) -> Result<(), Box<dyn std::error::Error>> {
+    fn increment_bridge_filter(&mut self, block_number: U64, log_discovered: bool) -> Result<(), Box<dyn std::error::Error>> {
         let contract_address = self.eo_address.clone().parse().map_err(|err| {
             EoServerError::Other(err.to_string())
         })?;
 
         let default: U64 = U64::from(0);
-        let highest_processed_block = self.bridge_processed_blocks.last().unwrap_or_else(|| &default);
-        let from_block = highest_processed_block.clone() + U64::from(1);
+        let from_block = self.bridge_processed_blocks.last().unwrap_or_else(|| &default);
+        let to_block = self.current_bridge_filter_block + U64::from(1); 
+
         let new_filter = FilterBuilder::default()
-            .from_block(BlockNumber::Number(from_block)) // Last processed block
-            .to_block(BlockNumber::Latest)
+            .from_block(BlockNumber::Number(*from_block)) // Last processed block
+            .to_block(BlockNumber::Number(to_block))
             .address(vec![contract_address])
             .topics(self.bridge_topic.clone(), None, None, None)
             .build();
 
+        if log_discovered {
+            self.bridge_processed_blocks.insert(block_number);
+        }
+
+        self.current_bridge_filter_block = block_number;
         self.bridge_filter = new_filter;
 
         Ok(())
     }
 
-    fn increment_blob_filter(&mut self, block_number: U64) -> Result<(), Box<dyn std::error::Error>> {
+    fn increment_blob_filter(&mut self, block_number: U64, log_discovered: bool) -> Result<(), Box<dyn std::error::Error>> {
         let contract_address = self.eo_address.clone().parse().map_err(|err| {
             EoServerError::Other(err.to_string())
         })?;
 
         let default: U64 = U64::from(0);
-        let highest_processed_block = self.settled_processed_blocks.last().unwrap_or_else(|| &default);
-        let from_block = highest_processed_block + U64::from(1);
+        let from_block = self.settled_processed_blocks.last().unwrap_or_else(|| &default);
+        let to_block = self.current_blob_settlement_filter_block + U64::from(1); 
 
         let new_filter = FilterBuilder::default()
-            .from_block(BlockNumber::Number(from_block))
-            .to_block(BlockNumber::Latest)
+            .from_block(BlockNumber::Number(*from_block))
+            .to_block(BlockNumber::Number(to_block))
             .address(vec![contract_address])
             .topics(self.blob_settled_topic.clone(), None, None, None)
             .build();
 
+        if log_discovered {
+            self.settled_processed_blocks.insert(block_number);
+        }
+        self.current_blob_settlement_filter_block = block_number;
         self.blob_settled_filter = new_filter;
 
         Ok(())
