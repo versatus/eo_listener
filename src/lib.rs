@@ -173,7 +173,6 @@ pub struct EoServer {
 
 impl EoServer {
     pub async fn load_processed_blocks(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        dbg!("Attempting to load processed blocks");
         let mut buf = Vec::new();
         let mut file = std::fs::OpenOptions::new()
             .read(true)
@@ -181,13 +180,11 @@ impl EoServer {
 
         file.read_to_end(&mut buf)?;
 
-        dbg!("loaded processed blocks");
         let blocks_processed: BlocksProcessed = bincode::deserialize(&buf)?;
         if let Some(b) = blocks_processed.bridge {
             self.current_bridge_filter_block = b;
         }
 
-        dbg!(&blocks_processed);
         if let Some(b) = blocks_processed.settle {
             self.current_blob_settlement_filter_block = b;
         }
@@ -372,9 +369,6 @@ impl EoServer {
         let from_block = self.bridge_processed_blocks.last().unwrap_or_else(|| &default);
         let to_block = self.current_bridge_filter_block + U64::from(1); 
 
-        dbg!("bridge filter from block", from_block);
-        dbg!("bridge filter to block", to_block);
-
         let new_filter = FilterBuilder::default()
             .from_block(BlockNumber::Number(*from_block)) // Last processed block
             .to_block(BlockNumber::Number(to_block))
@@ -400,9 +394,6 @@ impl EoServer {
         let default: U64 = U64::from(0);
         let from_block = self.settled_processed_blocks.last().unwrap_or_else(|| &default);
         let to_block = self.current_blob_settlement_filter_block + U64::from(1); 
-
-        dbg!("blob filter from block", from_block);
-        dbg!("blob filter to block", to_block);
 
         let new_filter = FilterBuilder::default()
             .from_block(BlockNumber::Number(*from_block))
