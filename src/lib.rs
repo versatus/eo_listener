@@ -282,8 +282,8 @@ impl EoServer {
             EventType::Bridge(event_abi) => { 
                 let bridge_log = self.handle_bridge_event(events, &event_abi); 
                 if let Ok(logs) = &bridge_log {
-                    dbg!(logs);
                     if logs.len() > 0 {
+                        log::info!("discovered logs: logs.len() = {}", logs.len());
                         self.increment_bridge_filter(block_number, true);
                     } else {
                         self.increment_bridge_filter(block_number, false);
@@ -368,6 +368,7 @@ impl EoServer {
         let default: U64 = U64::from(0);
         let from_block = self.bridge_processed_blocks.last().unwrap_or_else(|| &default);
         let to_block = self.current_bridge_filter_block + U64::from(1); 
+        log::info!("filtering from block {} to block {}", &from_block, &to_block);
 
         let new_filter = FilterBuilder::default()
             .from_block(BlockNumber::Number(*from_block)) // Last processed block
