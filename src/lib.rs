@@ -4,7 +4,6 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use derive_builder::Builder;
-use jsonrpsee::{proc_macros::rpc, types::ErrorObjectOwned as RpcError};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use tokio::sync::mpsc::UnboundedReceiver;
