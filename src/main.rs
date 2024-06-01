@@ -1,7 +1,4 @@
-use eo_listener::{
-    get_blob_index_settled_topic, get_bridge_event_topic, EoAddress, EoServer, EoServerBuilder,
-    EoServerError,
-};
+use eo_listener::{EoServer, EoServerError};
 use std::collections::BTreeSet;
 use std::str::FromStr;
 use web3::{transports::Http, types::BlockNumber, Web3};
