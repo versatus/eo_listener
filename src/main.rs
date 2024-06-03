@@ -10,7 +10,7 @@ async fn main() -> Result<(), EoServerError> {
         .map_err(|e| EoServerError::Other(e.to_string()))?;
 
     let http: Http =
-        Http::new("https://u0sb67wcu2:oqyk-7M8zc7F08HkDr48_Bk1TuZIcjzpC9on7ST-yWQ@u0d79gh32z-u0o7pt95od-rpc.us0-aws.kaleido.io/").map_err(|err| EoServerError::Other(err.to_string()))?;
+        Http::new("https://u0tuo4wstz:_gem7bf7mXFxSdDd4BZrVkRzxmExj0IHJNQIi-CrHlg@u0d79gh32z-u0o7pt95od-rpc.us0-aws.kaleido.io/").map_err(|err| EoServerError::Other(err.to_string()))?;
     let web3: Web3<Http> = Web3::new(http);
 
     let path = "./blocks_processed.dat";
