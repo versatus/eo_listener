@@ -9,8 +9,10 @@ async fn main() -> Result<(), EoServerError> {
     simple_logger::init_with_level(log::Level::Info)
         .map_err(|e| EoServerError::Other(e.to_string()))?;
 
+    let eth_rpc_url = std::env::var("ETH_RPC_URL").expect("ETH_RPC_URL environment variable is not set. Please set the ETH_RPC_URL environment variable with the JSON/RPC HTTP endpoint.");
+
     let http: Http =
-        Http::new("https://u0wg2s6qkr:iFquXU0AjYTJmtFRaP2gahIOUNHTH5oIuJyfX9ItUI4@u0auvfalma-u0j1mdxq0w-rpc.us0-aws.kaleido.io/").map_err(|err| EoServerError::Other(err.to_string()))?;
+        Http::new(&eth_rpc_url).map_err(|err| EoServerError::Other(err.to_string()))?;
     let web3: Web3<Http> = Web3::new(http);
 
     let path = "./blocks_processed.dat";
