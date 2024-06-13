@@ -52,7 +52,7 @@ pub fn get_bridge_event_topic() -> Option<Vec<H256>> {
     Some(vec![bridge_topic])
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct BlocksProcessed {
     pub bridge: Option<U64>,
     pub settle: Option<U64>,
